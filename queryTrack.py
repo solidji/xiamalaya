@@ -16,6 +16,9 @@
 # https://m.ximalaya.com/m-revision/page/anchor/queryAnchorPage/16199450?pageSize=20&tabType=1
 # http://m.ximalaya.com/m-revision/common/anchor/queryAnchorTracksByPage?anchorId=16199450&page=2&pageSize=20&asc=false
 
+# 荔枝FM用户音频列表
+# https://www.lizhi.fm/api/user/audios/4198958/1
+
 from time import sleep
 
 USER_AGENT = (
@@ -65,6 +68,112 @@ def createDBTable(reset=False):
           playUrl32 varchar(20), playUrl64 varchar(20), downloadUrl varchar(20), \
           playPathAacv164 varchar(20),playPathAacv224 varchar(20), downloadAacUrl varchar(20))"
     )
+
+
+def lizhiDownloadList(limit=6):
+    import sqlite3
+
+    # 读取数据库中未下载完成的
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(
+        "select * from lizhiAudios where isDownload = 0 order by voiceUserId limit :limit",
+        {"limit": limit},
+    )
+    tracks = cursor.fetchall()
+
+    # 安全关闭数据库连接
+    cursor.close()
+    conn.close()
+    return tracks
+
+
+def queryLizhiAudios(uid=4198958, page=1, pageSize=5):
+    import sqlite3
+    import requests
+    import json
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    # 5.荔枝FM单个用户声音列表
+    cursor.execute(
+        "CREATE TABLE IF NOT EXISTS lizhiAudios(id int primary key, name varchar(20), url varchar(20), voiceUserId int, isDownload INTEGER)"
+    )
+
+    totalCount = 1257  # 目前是1257
+    while totalCount > (page - 1) * pageSize:
+        queryUrl = "https://www.lizhi.fm/api/user/audios/{}/{}".format(uid, page)
+        headers = {"User-Agent": USER_AGENT}
+        response = requests.get(queryUrl, headers=headers)
+
+        js = json.loads(response.content)
+        pageSize = js["size"]
+        totalCount = js["total"]  # 一直循环到所有
+
+        trackList = js["audios"]
+        print(
+            "🚀 ~ func: queryLizhiAudios ~ page: {} count: {} \n track: {}. \n".format(
+                str(page), len(trackList), trackList[0]
+            )
+        )
+        # 过滤掉中文字符 or boolean
+        for track in trackList:
+            # 添加数据
+            cursor.execute(
+                "insert OR IGNORE into lizhiAudios values (?,?,?,?,?)",
+                (
+                    track["id"],
+                    track["name"],
+                    track["url"],
+                    track["voiceUserId"],
+                    0,
+                ),
+            )
+        page = js["p"] + 1
+        sleep(0.5)
+
+    # 安全关闭数据库连接
+    cursor.close()
+    conn.commit()
+    conn.close()
+
+
+def downloadAudio(track_info):
+    # 下载荔枝FM声音
+    import os
+    import sqlite3
+
+    audioId, name, url, voiceUserId, flag = track_info
+
+    album_path = os.path.join(DOWNLOAD_PATH, str(voiceUserId), name)
+    os.makedirs(album_path, exist_ok=True)
+
+    _, file_extension = os.path.splitext(url)
+    file_name = "%s%s" % (audioId, file_extension)
+    path_name = os.path.join(album_path, file_name)
+    print(audioId, url, path_name)
+
+    # 下载文件，成功后设置下载完成标记到数据库
+    try:
+        download_media_file(url, path_name)
+    except Exception as ex:
+        print(ex)
+        # pass
+        return False
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "UPDATE lizhiAudios SET isDownload = 1 WHERE id =:audioId",
+        {"audioId": audioId},
+    )
+
+    # 安全关闭数据库连接
+    cursor.close()
+    conn.commit()
+    conn.close()
+    return True
 
 
 def queryAnchorTracksByPage(args, page=1, pageSize=100):
@@ -329,14 +438,16 @@ def main():
     # createDBTable() # 第一次运行时创建数据库与表
     # queryAnchorTracksByPage(args) # 获取track列表，保存到trackInfo表
     # queryAnchorAlbumsByPage(args)  # 获取album列表，保存到album表
-
     result = getDownloadList(5)
+
+    # queryLizhiAudios() # 获取荔枝FM用户声音列表,保存到lizhiAudios表
+    # result = lizhiDownloadList(5)
+
     print(result)
-    # for m in result:
-    #     downloadTrack(m)
     has_error = False
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        func = partial(downloadTrack)
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        func = partial(downloadTrack)  # 下载喜马拉雅声音
+        # func = partial(downloadAudio)  # 下载荔枝FM声音
         errors = executor.map(func, result)
         for err in errors:
             has_error &= err
